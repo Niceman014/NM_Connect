@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/theme.dart';
 import '../../services/signaling_service.dart';
+import '../../services/webrtc_service.dart';
+import '../viewer/viewer_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -13,21 +15,26 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   final _sig = SignalingService();
+  late final WebRTCService _webrtc;
   final _targetCtrl = TextEditingController();
   final _log = <String>[];
   StreamSubscription? _msgSub;
 
   String? _myId;
   bool _online = false;
-  String? _incomingFrom;
+  String? _activePeerId;
+  bool _isHost = false;
 
   @override
   void initState() {
     super.initState();
+    _webrtc = WebRTCService(_sig);
     _bootstrap();
   }
 
   Future<void> _bootstrap() async {
+    await _webrtc.init(); // Initialize WebRTC renderer
+
     final prefs = await SharedPreferences.getInstance();
     var id = prefs.getString('device_id');
     if (id == null) {
@@ -39,12 +46,12 @@ class _HomeScreenState extends State<HomeScreen> {
     await _sig.connect(deviceId: id, deviceName: 'NM Connect (${id.substring(0, 4)})');
     _msgSub = _sig.messages.listen(_onMessage);
 
-    setState(() {});
+    if (mounted) setState(() {});
   }
 
   String _generateId() {
     final rnd = Random.secure();
-    final n = rnd.nextInt(900000000) + 100000000; // 9-digit, no leading zero
+    final n = rnd.nextInt(900000000) + 100000000;
     return n.toString();
   }
 
@@ -64,24 +71,49 @@ class _HomeScreenState extends State<HomeScreen> {
     _msgSub = _sig.messages.listen(_onMessage);
   }
 
-  void _onMessage(Map<String, dynamic> msg) {
+  void _onMessage(Map<String, dynamic> msg) async {
     final type = msg['type'];
     _appendLog('← $type');
+
     if (type == 'registered') {
-      setState(() => _online = true);
-    } else if (type == 'connect-request') {
-      setState(() => _incomingFrom = msg['from'] as String);
-      _showAcceptDialog(msg['from'] as String, msg['fromDeviceName'] as String? ?? 'Unknown');
-    } else if (type == 'connect-response') {
+      if (mounted) setState(() => _online = true);
+    } 
+    else if (type == 'connect-request') {
+      final from = msg['from'] as String;
+      final name = msg['fromDeviceName'] as String? ?? 'Unknown';
+      _showAcceptDialog(from, name);
+    } 
+    else if (type == 'connect-response') {
       final accepted = msg['accepted'] == true;
-      _appendLog(accepted ? '✓ peer accepted' : '✗ peer declined');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(accepted ? 'Peer accepted — handshake next step!' : 'Peer declined')),
-        );
+      final from = msg['from'] as String;
+      if (accepted) {
+        _appendLog('✓ peer accepted. Starting WebRTC...');
+        if (mounted) {
+          setState(() {
+            _isHost = false; // We initiated, so we are the viewer
+            _activePeerId = from;
+          });
+        }
+        _navigateToViewer(from);
+      } else {
+        _appendLog('✗ peer declined');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Peer declined')));
+        }
       }
-      setState(() => _incomingFrom = null);
-    } else if (type == 'error') {
+    } 
+    else if (type == 'offer') {
+      _appendLog('← WebRTC Offer received');
+      await _webrtc.handleOffer(msg['from'], msg['sdp']);
+    } 
+    else if (type == 'answer') {
+      _appendLog('← WebRTC Answer received');
+      await _webrtc.handleAnswer(msg['sdp']);
+    } 
+    else if (type == 'ice') {
+      await _webrtc.handleIce(msg['candidate']);
+    }
+    else if (type == 'error') {
       final code = msg['code'];
       _appendLog('⚠ error: $code');
       if (mounted) {
@@ -106,43 +138,54 @@ class _HomeScreenState extends State<HomeScreen> {
         title: const Text('Incoming connection'),
         content: Text('$name ($from)\nwants to connect to this device.'),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Deny'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Accept'),
-          ),
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Deny')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Accept')),
         ],
       ),
     );
+    
     _sig.respondConnection(to: from, accepted: accepted ?? false);
-    setState(() => _incomingFrom = null);
+    
+    if (accepted == true) {
+      _appendLog('✓ accepted. Starting screen capture...');
+      if (mounted) {
+        setState(() {
+          _isHost = true;
+          _activePeerId = from;
+        });
+      }
+      // Host starts capture and sends the WebRTC Offer
+      await _webrtc.startHost(from);
+    }
   }
 
   void _connect() {
     final target = _targetCtrl.text.trim();
-    if (target.length != 9) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Enter a 9-digit ID')),
-      );
-      return;
-    }
-    if (target == _myId) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Cannot connect to yourself')),
-      );
-      return;
-    }
+    if (target.length != 9) return;
+    if (target == _myId) return;
+
     _sig.requestConnection(target);
     _appendLog('→ connect-request to $target');
+  }
+
+  void _navigateToViewer(String peerId) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => ViewerScreen(webrtc: _webrtc, peerId: peerId),
+      ),
+    ).then((_) {
+      // When screen is closed, clean up WebRTC
+      _webrtc.dispose();
+      if (mounted) setState(() => _activePeerId = null);
+    });
   }
 
   @override
   void dispose() {
     _msgSub?.cancel();
     _sig.disconnect();
+    _webrtc.dispose();
     _targetCtrl.dispose();
     super.dispose();
   }
@@ -157,6 +200,24 @@ class _HomeScreenState extends State<HomeScreen> {
             const SizedBox(width: 8),
             Text('NM Connect', style: Theme.of(context).textTheme.titleMedium),
             const Spacer(),
+            if (_isHost)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                margin: const EdgeInsets.only(right: 12),
+                decoration: BoxDecoration(
+                  color: AppTheme.danger.withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: AppTheme.danger.withOpacity(0.5)),
+                ),
+                child: const Text(
+                  'Sharing Screen',
+                  style: TextStyle(
+                    color: AppTheme.danger,
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
             _StatusDot(online: _online),
           ],
         ),
@@ -175,29 +236,24 @@ class _HomeScreenState extends State<HomeScreen> {
                 controller: _targetCtrl,
                 keyboardType: TextInputType.number,
                 maxLength: 9,
+                enabled: _activePeerId == null,
                 style: const TextStyle(fontSize: 20, letterSpacing: 3),
-                decoration: const InputDecoration(
-                  hintText: '9-digit ID',
-                  counterText: '',
-                ),
+                decoration: const InputDecoration(hintText: '9-digit ID', counterText: ''),
               ),
               const SizedBox(height: 12),
               SizedBox(
                 width: double.infinity,
                 child: FilledButton.icon(
-                  onPressed: _online ? _connect : null,
+                  onPressed: _online && _activePeerId == null ? _connect : null,
                   icon: const Icon(Icons.arrow_forward),
-                  label: const Text('Connect'),
+                  label: Text(_activePeerId != null ? 'In Session...' : 'Connect'),
                 ),
               ),
               const SizedBox(height: 32),
               _label('Session log'),
               Container(
                 padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: AppTheme.surface,
-                  borderRadius: BorderRadius.circular(12),
-                ),
+                decoration: BoxDecoration(color: AppTheme.surface, borderRadius: BorderRadius.circular(12)),
                 child: Text(
                   _log.isEmpty ? '— nothing yet —' : _log.join('\n'),
                   style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
@@ -212,24 +268,13 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _label(String text) => Padding(
         padding: const EdgeInsets.only(bottom: 8),
-        child: Text(
-          text.toUpperCase(),
-          style: const TextStyle(
-            fontSize: 11,
-            letterSpacing: 1.5,
-            color: Colors.white54,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
+        child: Text(text.toUpperCase(), style: const TextStyle(fontSize: 11, letterSpacing: 1.5, color: Colors.white54, fontWeight: FontWeight.w600)),
       );
 
   Widget _idCard() {
     return Container(
       padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: AppTheme.surface,
-        borderRadius: BorderRadius.circular(16),
-      ),
+      decoration: BoxDecoration(color: AppTheme.surface, borderRadius: BorderRadius.circular(16)),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -238,26 +283,14 @@ class _HomeScreenState extends State<HomeScreen> {
               Expanded(
                 child: SelectableText(
                   _myId ?? '…',
-                  style: const TextStyle(
-                    fontSize: 36,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: 6,
-                    fontFeatures: [FontFeature.tabularFigures()],
-                  ),
+                  style: const TextStyle(fontSize: 36, fontWeight: FontWeight.w600, letterSpacing: 6, fontFeatures: [FontFeature.tabularFigures()]),
                 ),
               ),
-              IconButton(
-                tooltip: 'Regenerate ID',
-                icon: const Icon(Icons.refresh),
-                onPressed: _regenerateId,
-              ),
+              IconButton(tooltip: 'Regenerate ID', icon: const Icon(Icons.refresh), onPressed: _regenerateId),
             ],
           ),
           const SizedBox(height: 8),
-          const Text(
-            'Share this ID with the person you want to help or receive help from.',
-            style: TextStyle(color: Colors.white54, fontSize: 12),
-          ),
+          const Text('Share this ID with the person you want to help or receive help from.', style: TextStyle(color: Colors.white54, fontSize: 12)),
         ],
       ),
     );
@@ -272,11 +305,7 @@ class _StatusDot extends StatelessWidget {
     final c = online ? AppTheme.accent : Colors.orange;
     return Row(
       children: [
-        Container(
-          width: 8,
-          height: 8,
-          decoration: BoxDecoration(color: c, shape: BoxShape.circle),
-        ),
+        Container(width: 8, height: 8, decoration: BoxDecoration(color: c, shape: BoxShape.circle)),
         const SizedBox(width: 6),
         Text(online ? 'Online' : 'Connecting…', style: TextStyle(color: c, fontSize: 12)),
       ],
