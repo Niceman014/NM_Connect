@@ -1,0 +1,49 @@
+# ── Node / Server ──
+server/node_modules/
+server/dist/
+server/.env
+server/coverage/
+
+# ── Flutter / Dart ──
+app/.dart_tool/
+app/build/
+app/.flutter-plugins
+app/.flutter-plugins-dependencies
+app/.packages
+app/pubspec.lock
+app/windows/flutter/ephemeral/
+app/android/.gradle/
+app/android/local.properties
+app/android/app/debug/
+app/android/app/profile/
+app/android/app/release/
+
+# ── Rust ──
+native/**/target/
+native/**/Cargo.lock
+
+# ── Secrets & certificates ──
+*.env
+!.env.example
+**/*.p12
+**/*.p8
+**/*.jks
+**/*.keystore
+**/*.mobileprovision
+**/google-services.json
+**/GoogleService-Info.plist
+**/key.properties
+
+# ── Symbols / debug info ──
+**/symbols/
+**/split-debug-info/
+
+# ── OS junk ──
+.DS_Store
+Thumbs.db
+*.log
+
+# ── IDE ──
+.idea/
+.vscode/
+*.iml
