@@ -1,9 +1,3 @@
-# ── Node / Server ──
-server/node_modules/
-server/dist/
-server/.env
-server/coverage/
-
 # ── Flutter / Dart ──
 app/.dart_tool/
 app/build/
@@ -17,12 +11,21 @@ app/android/local.properties
 app/android/app/debug/
 app/android/app/profile/
 app/android/app/release/
+app/*.iml
+.dart_tool/
+
+# ── Node / Server ──
+server/node_modules/
+server/dist/
+server/.env
+server/coverage/
+node_modules/
 
 # ── Rust ──
 native/**/target/
 native/**/Cargo.lock
 
-# ── Secrets & certificates ──
+# ── Secrets & certs ──
 *.env
 !.env.example
 **/*.p12
@@ -34,7 +37,7 @@ native/**/Cargo.lock
 **/GoogleService-Info.plist
 **/key.properties
 
-# ── Symbols / debug info ──
+# ── Symbols ──
 **/symbols/
 **/split-debug-info/
 
